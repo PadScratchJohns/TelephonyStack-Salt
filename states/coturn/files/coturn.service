@@ -1,0 +1,23 @@
+[Unit]
+Description=Coturn STUN/TURN Server
+Documentation=man:coturn(1) man:turnadmin(1) man:turnserver(1)
+Wants=network-online.target
+After=network-online.target
+After=network.target
+
+[Service]
+LimitNOFILE=500000
+User=turnserver
+Group=turnserver
+Type=notify
+PIDFile=/run/turnserver/turnserver.pid
+ExecStart=/usr/bin/turnserver --daemon -c /etc/turnserver.conf --pidfile /run/turnserver/turnserver.pid --simple-log --new-log-timestamp --log-file /var/log/coturn/coturn.log
+#FixMe: turnserver exit faster than it is finshing the setup and ready for handling the connection.
+ExecStartPost=/bin/sleep 2
+Restart=always
+InaccessibleDirectories=/home
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target webrtc.service
+Alias=turnserver.service

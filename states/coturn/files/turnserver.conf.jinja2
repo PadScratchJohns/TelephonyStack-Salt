@@ -1,0 +1,47 @@
+{% set webun1 = salt['pillar.get']('coturn:un1') %}
+{% set webpw1 = salt['pillar.get']('coturn:pw1') %}
+{% set secret = salt['pillar.get']('coturn:secret') %}
+{% set realm1 = salt['pillar.get']('coturn:realm1') %}
+{% set realm2 = salt['pillar.get']('coturn:realm2') %}
+{% set privateip = salt['grains.get']('ip4_interfaces:eth0')[0] %}
+# Allow connection on the UDP port 3478
+# and 5349 for TLS (secure)
+# listening-ip={{ grains['public_ipv4'] }}
+# relay-ip={{ privateip }}
+listening-port=3478
+tls-listening-port=5349
+# Ports 
+min-port=10000
+max-port=50000
+# Require authentication
+fingerprint
+lt-cred-mech
+# The details below are the credentials used for TURN
+# user=webun1:webpw1
+# Multitenant can be used
+realm={{ realm1 }}
+realm={{ realm2 }}
+use-auth-secret
+static-auth-secret={{ secret }}
+
+# Total allocations quota - aka global limit of concurrent allocations to the server.
+#total-quota=100
+# Limiting nonce to 10 mins for security.
+stale-nonce=600
+
+# Logging stuff:
+log-file=/var/log/coturn/coturn.log
+simple-log
+new-log-timestamp
+
+# Enable prometheus exporter
+# =>v4.5.2 only in apt - otherwise you can manually compile it. 
+prometheus
+
+# Specify the process user and group
+proc-user=turnserver
+proc-group=turnserver
+
+# TODO: These certs need to sit in a vault or get put in via terraform 
+cert=/var/cert/my-cert.pem
+# pkey=/var/cert/my.key # this isn't anywhere in legacy so just commenting
