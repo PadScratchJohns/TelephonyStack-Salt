@@ -1,5 +1,3 @@
-{% set webun1 = salt['pillar.get']('coturn:un1') %}
-{% set webpw1 = salt['pillar.get']('coturn:pw1') %}
 {% set secret = salt['pillar.get']('coturn:secret') %}
 {% set realm1 = salt['pillar.get']('coturn:realm1') %}
 {% set realm2 = salt['pillar.get']('coturn:realm2') %}
@@ -44,4 +42,4 @@ proc-group=turnserver
 
 # TODO: These certs need to sit in a vault or get put in via terraform 
 cert=/var/cert/my-cert.pem
-# pkey=/var/cert/my.key # this isn't anywhere in legacy so just commenting
+# pkey=/var/cert/my.key

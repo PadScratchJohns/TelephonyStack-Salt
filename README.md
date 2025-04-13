@@ -15,5 +15,6 @@ This is how the automation kows which box requires which software.
 Grains - the VM's own data. (private ip, mac address, hostname, etc)
 Mine - other VM's grain data (same as above)
 Pillar - data that the VM's would not naturally know. (fqdn, external services, etc)
+Custom grains - You have to run the sync_grains script. This parses the hostname in grains and adds them to the box. 
 
-#
+# How to run
