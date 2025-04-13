@@ -11,4 +11,9 @@ The master know what the boxes are because of the "grains" - this including cust
 Terraform sets the hostname of the boxes and a python script parses the hostname and sets the grains on each box. 
 This is how the automation kows which box requires which software. 
 
+# Data split
+Grains - the VM's own data. (private ip, mac address, hostname, etc)
+Mine - other VM's grain data (same as above)
+Pillar - data that the VM's would not naturally know. (fqdn, external services, etc)
+
 #
