@@ -1,0 +1,99 @@
+{% set privateip = salt['grains.get']('ip4_interfaces:eth0')[0] %}
+{% set publicip = salt['grains.get']('public_ipv4') %}
+{% set homerip = salt['pillar.get']('homer_private_ip') %}
+{% set product = salt['grains.get']('product') %}
+{% set zone = salt['grains.get']('zone') %}
+{% set env = salt['grains.get']('environment') %}
+{% set srv = salt['grains.get']('srvtype') %}
+[rtpengine]
+
+table = 0
+# no-fallback = false
+### for userspace forwarding only:
+# table = -1
+
+### a single interface:
+# interface = privateip!publicip
+# interface = {{ privateip }}!{{ publicip }}
+### Nat environment public/private split.
+{% if (srv == 'recording') %}
+interface = public/{{ privateip }}!{{ publicip }}
+{% else %}
+interface = private/{{ privateip }};public/{{ privateip }}!{{ publicip }}
+{% endif %}
+# For Active/Active failover: use alias names for the interfaces. 
+# name1/IP;name2/IP;alias=name1
+# name1/IP;name2/IP;alias=name2
+#interface = private/privLB1;public/pubLB1;private/privLB2;public/pubLB2
+
+listen-cli = {{ privateip }}:2224
+
+listen-ng = {{ privateip }}:2223
+# listen-tcp = 25060
+# listen-udp = 12222
+
+### interface for HTTP, WS and Prometheus
+listen-http = 9101
+
+timeout = 60
+silent-timeout = 3600
+tos = 184
+#control-tos = 184
+delete-delay = 1
+# final-timeout = 10800
+
+# foreground = false
+# pidfile = /run/ngcp-rtpengine-daemon.pid
+# num-threads = 16
+
+
+port-min = 10000
+port-max = 50000
+# max-sessions = 5000
+{% if (srv == 'recording') %}
+# see rtpengine-recording -h for more
+recording-dir = /data01/rtpengine/
+recording-method = proc
+#recording-format = raw
+{% endif %}
+# For redis keyspace stores - need a duplicate for HA separated out via jinja maybe
+# So RTPengine 1 will wite to keyspace 2 and RTPengine 2 will write to keyspace 1 
+# redis = 127.0.0.1:6379/5
+# redis-write = password@12.23.34.45:6379/42
+# redis-num-threads = 8
+# no-redis-required = false
+# redis-expires = 86400
+# redis-allowed-errors = -1
+# redis-disable-time = 10
+# redis-cmd-timeout = 0
+# redis-connect-timeout = 1000
+
+# b2b-url = http://127.0.0.1:8090/
+# xmlrpc-format = 0
+# Log level 6 is INFO then decending is NOTICE WARNING ERR CRIT ALERT EMERG. Level 7 is DEBUG
+log-level = 5
+log-stderr = false
+log-facility = daemon
+log-facility-cdr = local0
+log-facility-rtcp = local1
+
+# graphite = 127.0.0.1:9006
+# graphite-interval = 60
+# graphite-prefix = foobar.
+{% if (env == 'loadtest') or (env == 'demo') %}
+# No homer for loadtest
+{% else %}
+ homer = varhomer.200:9060
+ homer-protocol = udp
+ homer-id = 2001
+{% endif %}
+# sip-source = false
+# dtls-passive = false
+
+[rtpengine-testing]
+table = -1
+interface = 10.15.20.121
+listen-ng = 2223
+foreground = true
+log-stderr = true
+log-level = 7
