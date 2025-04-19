@@ -2,9 +2,9 @@
 {% set realm1 = salt['pillar.get']('coturn:realm1') %}
 {% set realm2 = salt['pillar.get']('coturn:realm2') %}
 {% set privateip = salt['grains.get']('ip4_interfaces:eth0')[0] %}
-# Allow connection on the UDP port 3478
-# and 5349 for TLS (secure)
+# Uncomment the belwo to set the listening ip 
 # listening-ip={{ grains['public_ipv4'] }}
+# For NAT'ing TURN traffic, or sending from said relay-ip.
 # relay-ip={{ privateip }}
 listening-port=3478
 tls-listening-port=5349

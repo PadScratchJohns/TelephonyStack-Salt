@@ -1,0 +1,1 @@
+# Confernece FS setup - private ip space only as traffic is NAT'd at the proxy level

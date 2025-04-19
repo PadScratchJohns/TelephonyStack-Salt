@@ -5,7 +5,7 @@ mine_functions:
     - roles
     - srvtype
     - instance
-    - az
+    - az # mainly for cloud providers
     - public_ipv4
     - fqdn
     - ipv4
