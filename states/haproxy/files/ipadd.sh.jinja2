@@ -1,0 +1,7 @@
+{% set octet = salt['pillar.get']('dbnode:octet') %}
+{% set lbip = salt['pillar.get']('dbnode:lbip') %}
+#!/bin/bash
+
+sudo ip addr add 172.16.{{ octet }}.251/32 dev lo:0
+sudo ip addr add {{ lbip }}/32 dev lo:1
+exit 0 

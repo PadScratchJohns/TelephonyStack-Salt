@@ -3,6 +3,7 @@ base:
     '*':
         - chrony
         - syslog
+        - motd
         #- node_exporter commented for now
 # Role specific configs.
 # Proxy for carrier traffic
@@ -18,11 +19,15 @@ base:
         - match: compound
         - dbnode
 # B2BUA FreeSWITCH
-    'G@roles:freeswitch':
+    'G@roles:b2bua':
         - match: compound
-        - freeswitch.media.packages
+        - freeswitch.b2bua
         - freeswitch
-        - freeswitch.media
+# Conference FreeSWITCH
+    'G@roles:conference':
+        - match: compound
+        - freeswitch.conference
+        - freeswitch
 # For in front of the DBNodes
     'G@roles:haproxy':
         - match: compound
