@@ -1,5 +1,4 @@
-{% set octet = salt['pillar.get']('dbnode:octet') %}
-{% set env = salt['grains.get']('environment') %}
+{% set node_list = salt['pillar.get']('dbnode:haproxylist') %}
 frontend postgres_frontend
     bind *:5432
     mode tcp
@@ -13,6 +12,4 @@ backend postgres_backend
     timeout connect 5s
     timeout client 30s
     timeout server 30s
-    server pg1 {{ dbnode1 }}:5432 port 8008 check verify none
-    server pg2 {{ dbnode1 }}:5432 port 8008 check verify none
-    server pg3 {{ dbnode1 }}:5432 port 8008 check verify none
+    {{ node_list }}
