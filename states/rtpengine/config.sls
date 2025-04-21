@@ -87,3 +87,16 @@ rtpengine_call_recording_file:
         - group: rtpengine
         - mode: 0644
 {% endif %}
+var_swap_script:
+    file.managed:
+        - name: /cfg/variableswap.sh
+        - source: salt://{{ slspath }}/files/variableswap.sh
+        - mode: 0744
+        - require: 
+            - file: /etc/rtpengine/rtpengine.conf
+# Neess the script before it runs. 
+run_var_swap_script:
+    cmd.run:
+        - name: /cfg/variableswap.sh
+        - require: 
+            - file: /cfg/variableswap.sh

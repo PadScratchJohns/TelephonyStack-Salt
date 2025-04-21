@@ -1,1 +1,4 @@
-# postgresql 17 
+include:
+    - dbnode.install
+    - dbnode.config
+    - dbnode.service

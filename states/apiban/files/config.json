@@ -1,0 +1,7 @@
+{
+	"apikey":"{{ apikey }}",
+	"lkid":"100",
+	"version":"1.0",
+	"set":"sip",
+	"flush":"200"
+}

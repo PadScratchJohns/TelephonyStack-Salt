@@ -10,6 +10,7 @@ base:
     'G@roles:carrier':
         - match: compound
         - carrier
+        - apiban
 # STUN/TURN service
     'G@roles:coturn':
         - match: compound
@@ -41,12 +42,14 @@ base:
         - match: compound
         - kamailio.core
         - kamailio
+        - apiban
         #- keepalived
 # SIP Proxy for customer traffic - handles registration and NAT
     'G@roles:kamailio and G@srvtype:reg':
         - match: compound
         - kamailio.reg
         - kamailio
+        - apiban
         #- keepalived
 # For the LGTM stack - should be a containerised service really. 
     'G@roles:prometheus':

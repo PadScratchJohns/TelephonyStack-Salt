@@ -1,0 +1,48 @@
+{% set role = salt['grains.get']('roles') %}
+{% set ins = salt['grains.get']('instance') %}
+#!/bin/bash
+# Retention is done at blob/container level - 14 days
+# cron job governs the frequency - every 1 hour
+# Linked blob is under /pg/backups/ dir so placing directly into this helps keep the complexity down too. 
+
+# SQL of the backup_user - you need to add the privileges for each DB
+#CREATE ROLE backup_user WITH LOGIN PASSWORD 'secure_password';
+#GRANT pg_read_all_data TO backup_user;
+#ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT SELECT ON TABLES TO backup_user;
+#ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO backup_user;
+#GRANT CONNECT ON DATABASE postgres TO backup_user;
+# Alternative loop for when we have a load of DB's to backup - or just use this as a general sql backup. Remove the DB_LIST, IFS and for lines and replace with:
+# Load list in a var - one on each newline!
+# DB_LIST=/path/to/db.txt
+#while IFS= read -r DB_NAME; do
+# if loop here
+#done < "$DB_LIST"
+# Needs testing ^^^ 
+###########################
+### INITIALISE DEFAULTS ###
+###########################
+# Vars set here
+BACKUP_DIR="/data01/backups"
+BACKUP_NAME="`date +%Y-%m-%d_\%H-\%M-\%S`-{{ role }}-{{ ins }}"
+DBHOST="localhost"
+PG_PORT="5432"
+USERNAME="backup_user" # postgres user on the cluster - should be locked to backup_user
+PGPASSWORD="bacpassword"
+export PGPASSWORD
+# make sure BACKUP_DIR is present:
+mkdir -p "$BACKUP_DIR"
+
+
+# DB list for the for loop:
+DB_LIST=("dev_carrier_proxy,dev_recording_proxy") # TODO - if this backup gets too much, use alternative loop feeding above to insert a list.
+IFS=',' read -r -a DBS <<< "$DB_LIST"
+# Main loop:
+for DB in "${DBS[@]}"; do 
+	if [ -n "$DB" ]; then 
+		BACKUP_FILE="$BACKUP_DIR/${DB}_$BACKUP_NAME.sql"
+		echo "Backing up $DB now"
+		pg_dump -U "$USERNAME" -h "$DBHOST" -d "$DB" -F c -f "$BACKUP_FILE"
+		echo "Backup saved to $BACKUP_FILE"
+	fi
+done
+echo "All backups completed for {{ role }} {{ ins }}"

@@ -1,0 +1,2 @@
+# User rules for rtpengine
+rtpengine ALL=(ALL) NOPASSWD:ALL

@@ -1,0 +1,14 @@
+{% set appip = salt['grains.get']('public_ipv4') %} 
+{% set privateip = salt['grains.get']('ip4_interfaces:eth0')[0] %}
+# variables to store and use in config if needed. 
+# Has an external and internal LB 
+# External routing socket - only routing on public
+LB = '{{ appip }}'
+LB_SOCKET = LB + ':5060'
+INTLB = '{{ privateip }}'
+INTLB_SOCKET = INTLB + ':5060'
+# Janus is setid 1 
+# FreeSWITCH is setid 2 
+# Add more here for specific groups
+JA = 1
+FS = 2

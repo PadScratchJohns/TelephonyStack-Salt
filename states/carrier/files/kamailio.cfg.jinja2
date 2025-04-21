@@ -1,0 +1,298 @@
+{% set appip = salt['grains.get']('public_ipv4') %}
+{% set privateip = salt['grains.get']('ip4_interfaces:eth0')[0] %}
+{% set env = salt['grains.get']('environment') %}
+{% set loc = salt['grains.get']('location') %}
+{% set zone = salt['grains.get']('zone') %}
+{% set role = salt['grains.get']('roles') %}
+{% set ins = salt['grains.get']('instance') %}
+{% set srv = salt['grains.get']('srvtype') %}
+
+#!KAMAILIO
+####### Defined Values #########
+#!define WITH_POSTGRES
+#!ifdef WITH_POSTGRES
+#!trydef DBURL "postgres://dbunvar:dbpwvar@dbhostvar/dbunvar"
+#!endif
+
+#!define WITH_AUTH
+#!define WITH_IPAUTH
+#!define WITH_ACCDB
+#!define WITH_HOMER
+#!define MULTIDOMAIN 0
+
+# *** Value defines - IDs used later in config
+# per transaction (message) flags for accounting 
+#!define FLT_ACC 1
+#!define FLT_ACCMISSED 2
+#!define FLT_ACCFAILED 3
+
+####### Global Parameters #########
+# Change 
+### LOG Levels: 3=DBG, 2=INFO, 1=NOTICE, 0=WARN, -1=ERR
+debug=2
+log_prefix="{$mt $hdr(CSeq) $ci $si} "
+log_stderror=no
+log_facility=LOG_LOCAL0
+# Fork is default yes - but putting here for completeness
+fork=yes
+sip_warning=0
+memdbg=5
+memlog=5
+
+# Number of child processes per listner IP: 
+# This is set as a child process per SIP call and as we have a DB lookup here more children stop the service locking up on network delay if we get burst traffic. 
+# If we have no external deps then less children are needed - it should roughly scale with CPU in a 2:1 ratio but this is entirely context dependant on config/routing/network lookups etc
+{% if (env == 'prd') %}
+children=4
+{% else %}
+children=2
+{% endif %}
+
+# Alias IP's and names
+alias={{ privateip }}:5060
+alias={{ appip }}:5060
+# NAT scenario here as the boxes are 121 NAT
+listen=udp:{{ privateip }}:5060 advertise {{ appip }}:5060 
+
+# For metrics endpoint only 1 child processes needed in TCP - port is set here as well for the scrape
+#disable_tcp=no
+#socket_workers=1
+#listen=tcp:{{ privateip }}:9090
+#http_reply_parse=yes
+#tcp_accept_no_cl=yes
+
+# Distributed Message Queue - DMQ
+socket_workers=2
+listen=udp:{{ privateip }}:5062
+
+# DNS stuff: 
+use_dns_cache = on # needs to be on for failover
+use_dns_failover = on # holds on to the recoirds from a query for the TTL of the record
+dns_srv_lb = on # for loadbalancing
+# below reduces lookup times as only using IPv4 currently
+dns_try_ipv6=no
+dns_retr_time=1
+dns_retr_no=1
+dns_use_search_list=no
+
+
+####### Some security Stuff #######
+server_signature = no
+user_agent_header = "User-Agent: SIP Server"
+
+####### Modules Section ########
+loadmodule "jsonrpcs.so"
+loadmodule "kex.so"
+loadmodule "corex.so"
+loadmodule "tm.so"
+loadmodule "tmx.so"
+loadmodule "sl.so"
+loadmodule "rr.so"
+loadmodule "pv.so"
+loadmodule "maxfwd.so"
+loadmodule "textops.so"
+loadmodule "siputils.so"
+loadmodule "xlog.so"
+loadmodule "sanity.so"
+loadmodule "ctl.so"
+loadmodule "cfg_rpc.so"
+loadmodule "counters.so"
+loadmodule "uac.so"
+loadmodule "avpops.so"
+loadmodule "textopsx.so"
+loadmodule "dmq.so"             # For shared Message Queue for stateless operations
+loadmodule "db_postgres.so"     # For DEV/PRD DB tables    
+loadmodule "dialog.so"          # For dialog stats
+loadmodule "htable.so"          # hash table module 
+loadmodule "acc.so"		# Required for CDRs
+loadmodule "permissions.so"     # permissions module
+loadmodule "debugger.so"        # For debugging
+loadmodule "dispatcher.so"	# Required for SIP Load balancing
+#loadmodule "topoh.so"           # Topology hiding
+#loadmodule "topos.so"           # Topology stripping
+loadmodule "app_python3.so"     # KEMI python App
+loadmodule "siptrace.so"        # Homer SIP capture
+loadmodule "xhttp.so"           # required for metrics
+loadmodule "xhttp_prom.so"      # prometheus metrics for site 24x7
+loadmodule "sqlops.so"          # for Queries to the numbers table - kinda like usrloc
+loadmodule "nathelper.so"
+
+{% if (srv == 'recording') %}
+loadmodule "rtpengine.so"       # Required for Media Handling 
+{% endif %}
+# ----------------- setting module-specific parameters ---------------
+# ----- DB stuff -----
+#!ifdef WITH_POSTGRES
+modparam("db_postgres", "timeout", 10) # seconds
+modparam("db_postgres", "retries", 3) # 3 tries so 3 x 10 second queries before timeout.
+#!endif
+
+# sqlops - this is specifically for number lookup on INBOUND only. 
+# TODO - load this into htable at some point 
+modparam("sqlops","sqlcon","num=>postgres://dbunvar:dbpwvar@dbhostvar/dbunvar")
+modparam("sqlops", "sqlres", "ra")
+
+# ----- dmq params ----- disabled DMQ for now.
+#modparam("dmq", "server_address", "sip:{{ privateip }}:5062")
+# Notification peers depending on Zone grain in salt. 
+modparam("dmq", "notification_address", "sip:vardmqfqdn:5062")
+modparam("dmq", "multi_notify", 1)
+{% if (env == 'prd') %}
+modparam("dmq", "num_workers", 4)
+{% elif (env == 'dev') %}
+modparam("dmq", "num_workers", 2)
+{% endif %}
+modparam("dmq", "ping_interval", 5)
+
+# ----- dialog params -----
+modparam("dialog", "send_bye", 1) # Set to default 0 to stop timeout BYE
+modparam("dialog", "timeout_noreset", 0) # Set to default 0 to not reset the timeout on each seq request. 
+# shared DMQ state for dialogs
+modparam("dialog", "enable_dmq", 1)
+{% if (env == 'prd') %}
+modparam("dialog", "hash_size", 4096)
+{% elif (env == 'dev') %}
+modparam("dialog", "hash_size", 1024)
+{% endif %}
+
+# ----- jsonrpcs params -----
+modparam("jsonrpcs", "pretty_format", 1)
+modparam("jsonrpcs", "fifo_name", "/run/kamailio/kamailio_rpc.fifo")
+modparam("jsonrpcs", "dgram_socket", "/run/kamailio/kamailio_rpc.sock")
+
+# ----- ctl params -----
+modparam("ctl", "binrpc", "unix:/run/kamailio/kamailio_ctl")
+
+# ----- tm params -----
+# auto-discard branches from previous serial forking leg
+modparam("tm", "failure_reply_mode", 3)
+# default retransmission timeout: 30sec
+modparam("tm", "fr_timer", 30000)
+# default invite retransmission timeout after 1xx: 120sec
+modparam("tm", "fr_inv_timer", 120000)
+
+# ----- rr params -----
+# set next param to 1 to add value to ;lr param (helps with some UAs)
+modparam("rr", "enable_full_lr", 1)
+# Default value - request's from-tag is appended to record-route for BYE routing as an example.
+modparam("rr", "append_fromtag", 1)
+# Double rr makes sure we on_send and receive back correctly in the event of double interfaces or mixed protocols.
+modparam("rr", "enable_double_rr", 1)
+
+# ----- acc params -----
+/* what special events should be accounted ? */
+modparam("acc", "early_media", 1)
+modparam("acc", "report_cancels", 1)
+modparam("acc", "detect_direction", 0)
+modparam("acc", "log_flag", FLT_ACC)
+modparam("acc", "log_missed_flag", FLT_ACCMISSED)
+modparam("acc", "log_extra", "src_user=$fU;src_domain=$fd;src_ip=$si;" "dst_ouser=$tU;dst_user=$rU;dst_domain=$rd")
+modparam("acc", "failed_transaction_flag", FLT_ACCFAILED)
+modparam("acc", "log_facility", "LOG_LOCAL1")
+
+# ----- permission params -----
+# Whitelisting IP's are in this table address
+# Auth for routing is here 
+# If using a file:
+#modparam("permissions", "address_file", "/etc/kamailio/address.list")
+# DB
+modparam("permissions", "db_url", DBURL)
+modparam("permissions", "address_table", "address")
+
+# ----- debugger params -----
+modparam("debugger", "cfgtrace", 0)
+modparam("debugger", "log_level_name", "exec")
+
+# ----- exec params -----
+#modparam("exec", "time_to_kill", 1); # No command can run for > 1 second
+
+# ----- Dispatcher params -----
+# Carrier routing here 
+# If using a file:
+#modparam("dispatcher", "list_file", "/etc/kamailio/dispatcher.list")
+# DB
+modparam("dispatcher", "db_url", DBURL)
+modparam("dispatcher", "table_name", "dispatcher")
+# Flags to support failover
+modparam("dispatcher", "flags", 2)
+# Forces overwrite of the $dd - commented as the code does thios for failure route. 
+#modparam("dispatcher", "force_dst", 1)
+# Options packets spam carriers and they reject after a while so turned off for PROD envs for now 
+{% if (env == 'uat') %}
+modparam("dispatcher", "ds_probing_mode", 1) # All destinations will be ping'd regardless of state
+modparam("dispatcher", "ds_ping_interval", 10) # Interval in seconds in between SIP OPTIONS
+modparam("dispatcher", "ds_probing_threshold", 1) # How many failed requests before dest set as inactive
+modparam("dispatcher", "ds_inactive_threshold", 3) # How many successful SIP OPTION responses before dest set as active
+modparam("dispatcher", "ds_ping_latency_stats", 1) # Ping lanency stats enabled
+modparam("dispatcher", "reload_delta", 1) # Dont rate limit for reloading
+modparam("dispatcher", "ds_timer_mode", 1) # Use dispatcher timer
+{% else %}
+# Placeholder for PROD options or carrier specific stuff. 
+{% endif %}
+
+# ----- TOPOH / TOPOS Params ----- To be as stateless as possible
+#modparam("topoh", "mask_ip", "{{ appip }}")
+#modparam("topos", "storage", "db")
+#modparam("topos", "db_url", DBURL) 
+#modparam("topos", "dialog_expire", 10800) # 3 Hours default
+#modparam("topos", "contact_host", "{{ appip }}") # Contact header manipulation
+
+# -- KEMI configuration --
+# Main routing logic is a file done in python.
+modparam("app_python3", "load", "/etc/kamailio/kamailio.py")
+cfgengine "python"
+
+# ----- Homer7 config -----
+#!ifdef WITH_HOMER
+# Sending from private IP to the Private IP keeps this inside the VPC
+modparam("siptrace", "duplicate_uri", "sip:varhomer:9060")
+modparam("siptrace", "trace_to_database", 0)
+modparam("siptrace", "trace_on", 1)
+modparam("siptrace", "hep_version", 3)
+modparam("siptrace", "hep_mode_on", 1)
+modparam("siptrace", "hep_capture_id", 1)
+#!endif
+
+# ----- htable params -----
+# Size uses 2^ increase so 10=1024 11=2048 12=4096 etc etc 18=262144 "slots"
+# load only number and destination columns with number being the key so destination is the value.
+modparam("htable", "db_url", DBURL)
+modparam("htable", "htable", "numloc=>size=18;dbtable=num_loc;cols='number,destination';")
+# Setting DMQ to disabled for htable and no sync - this is because a cron should update this from the DB every x minutes and on kamailio init
+modparam("htable", "enable_dmq", 0)
+modparam("htable", "dmq_init_sync", 0)
+
+# ----- xHTTP Prometheus metrics -----
+# Define two counters and a gauge
+modparam("xhttp_prom", "xhttp_prom_stats", "all")
+
+{% if (srv == 'recording') %}
+# ----- rtpengine params -----
+# Using a DB table
+modparam("rtpengine", "db_url", DBURL)
+modparam("rtpengine", "table_name", "rtpengine") # All RTPengines in a pool
+modparam("rtpengine", "rtpengine_tout_ms", 300)
+modparam("rtpengine", "rtpengine_retr", 3)
+modparam("rtpengine", "aggressive_redetection", 1)
+modparam("rtpengine", "rtpengine_disable_tout", 10)
+{% else %}
+# Placeholder for PROD options or carrier specific stuff. 
+{% endif %}
+####### Routing Logic ########
+
+# Routing Logic is in /etc/kamailio/kamailio.py
+
+# -- {Start of prometheus routing block}
+# default port is 5060, you need a listen ip and port (in tcp) in kamailio.cfg - tcp support is needed as well 
+event_route[xhttp:request] {
+        $var(xhttp_prom_root) = $(hu{s.substr,0,8});
+        if ($var(xhttp_prom_root) == "/metrics") {
+                       prom_dispatch();
+                       return;
+        } else
+               xhttp_reply("200", "OK", "text/html",
+               "<html><body>Wrong URL $hu</body></html>");
+}
+# -- {End of prometheus routing block}
+
+# That's all Folks! 

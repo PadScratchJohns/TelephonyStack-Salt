@@ -1,0 +1,73 @@
+{% set privateip = salt['grains.get']('ip4_interfaces:eth0')[0] %}
+{% set env = salt['grains.get']('environment') %}
+{% set ins = salt['grains.get']('instance') %}
+{% set vnet = salt['pillar.get']('dbnode:vnet') %}
+{% set octet = salt['pillar.get']('dbnode:octet') %}
+{% set hosts = salt['pillar.get']('dbnode:hosts') %}
+{% set shm = salt['pillar.get']('dbnode:shm') %}
+scope: postgresqlcluster
+namespace: /service/
+name: pg{{ ins }}  # node{{ ins }}
+# for v3 API use etcd3:
+etcd3:
+  hosts: 172.16.{{ octet }}.191:2379,172.16.{{ octet }}.192:2379,172.16.{{ octet }}.193:2379  # etcd cluster nodes
+  protocol: http
+# check leader with this: patronictl -c /etc/patroni/config.yml list postgresqlcluster
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: {{ privateip }}:8008  # IP for node1's REST API
+# this section will be written into Etcd:/<namespace>/<scope>/config after initializing new cluster
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1928576
+    postgresql:
+      parameters:
+        ssl: 'off'
+      pg_hba:  # Access rules
+        - local  all  postgres  md5
+        - host  replication  replicator  127.0.0.1/32  md5
+        - host  replication  replicator  172.16.{{ octet }}.191/32  md5
+        - host  replication  replicator  172.16.{{ octet }}.192/32  md5
+        - host  replication  replicator  172.16.{{ octet }}.193/32  md5
+        - host  all  all  127.0.0.1/32  md5
+        - host  all  all  {{ vnet }}.0/24  md5
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+  users:
+    replicator:
+      password: reppassword
+      options:
+        - replication
+    backup_user:
+      password: bacpassword
+      options:
+        - connect
+        - select
+        - usage
+  post_init: /cfg/post_init.sh
+
+postgresql:
+  listen: {{ privateip }}:5432
+  connect_address: {{ privateip }}:5432  # IP for node{{ ins }}'s PostgreSQL
+  data_dir: /var/lib/postgresql/data
+  bin_dir: /usr/lib/postgresql/17/bin  # Binary directory for PostgreSQL 17
+  authentication:
+    superuser:
+      username: postgres
+      password: pospassword  # Superuser password - changed with bash script
+    replication:
+      username: replicator
+      password: reppassword  # Replication password - changed with bash script
+  parameters:
+    max_connections: 500 # Set arbitrarily at 500 here
+    shared_buffers: "{{ shm }}GB" # Held in pillar data 
+    unix_socket_directories: '/var/run/postgresql'
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false

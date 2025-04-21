@@ -4,6 +4,8 @@ Just some boilerplate installs and config for setting up a fully functional tele
 
 This is designed to be used with a database and as such I have the templates and installs for it in this repo and the "tf-templates" in this account. 
 
+The tf templates should put the passwords and other sensitive env type vars in the path /cfg/ 
+
 # Run down
 Nice and easy - salt-stack is being used here and is already on the boxes and linked to the master. 
 All commands are run from the salt master. 

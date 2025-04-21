@@ -1,0 +1,4 @@
+TODO - set the API ban cron interval to be in relation to the instance number of the VM. 
+so VM1 is every 1 minute past the hour
+VM2 is every 2 minutes past the hour, etc
+API Key store somewhere not in the repo

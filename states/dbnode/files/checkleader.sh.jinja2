@@ -1,0 +1,16 @@
+{% set dbnode1 = salt['pillar.get']('dbnode:dbnode1') %}
+{% set dbnode2 = salt['pillar.get']('dbnode:dbnode2') %}
+{% set dbnode3 = salt['pillar.get']('dbnode:dbnode3') %}
+#!/bin/bash
+# simple leader check from the saltmaster or anything in that subnet
+OUT1=$(curl -k http://{{ dbnode1 }}:8080/primary)
+OUT2=$(curl -k http://{{ dbnode2 }}:8080/primary)
+OUT3=$(curl -k http://{{ dbnode3 }}:8080/primary)
+echo "DB node 1 is: $OUT1"
+echo "DB node 2 is: $OUT2"
+echo "DB node 3 is: $OUT3"
+# find out what it outputs and do a test case for the leader node. 
+# something like:
+#if [ "$OUT1" == "leader?" ]; then
+#    echo "DBNode 1 is the Leader"
+#fi

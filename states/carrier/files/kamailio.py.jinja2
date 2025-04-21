@@ -1,0 +1,403 @@
+{% set appip = salt['grains.get']('public_ipv4') %} 
+{% set privateip = salt['grains.get']('ip4_interfaces:eth0')[0] %}
+{% set env = salt['grains.get']('environment') %}
+{% set srv = salt['grains.get']('srvtype') %}
+import os
+import sys
+import socket
+import time
+import datetime
+import struct
+import re
+import random
+import syslog
+import Router.Logger as Logger
+import KSR as KSR
+import kemivars
+from threading import Semaphore
+
+# global variables corresponding to defined values (e.g., flags) in kamailio.cfg
+FLT_ACC = 1
+FLT_ACCMISSED = 2
+FLT_ACCFAILED = 3
+LOCK = Semaphore(value=1)
+
+#####
+# return code -255 is used to stop processing the message and drop it. This returns on error as well. 
+# return code 0 is used to stop processing in this specific route block but others may still continue. 
+# return code 1 is used to signify a success and to continue processing. 
+#####
+
+# global function to instantiate a kamailio class object
+# Init executed when kamailio app_python module is initialized
+# Class executed when kamailio child processes are initialized
+def mod_init():
+    KSR.info("===== from Python mod init\n")
+    # dumpObj(KSR)
+    return kamailio()
+
+# -- {start defining kamailio class}
+class kamailio:
+    def __init__(self):
+        KSR.info('===== kamailio.__init__\n')
+
+    def child_init(self, rank):
+        KSR.info('===== kamailio.child_init(%d)\n' % rank)
+        return 0
+
+##### Main Routing Block #####
+# -- equivalent of request_route{}
+    def ksr_request_route(self, msg):
+# KDMQ message handler - for dlg sharing to HA failover. 
+        if KSR.is_KDMQ() != -1 and KSR.pv.get("$rp")=="5062":
+            KSR.dmq.handle_message()
+            return 1
+# Start Homer trace dup here so it gets all requests. 
+        KSR.siptrace.sip_trace_mode("t")
+# Handle dialog for all requests: 
+        KSR.dialog.dlg_manage()
+# per request initial checks
+        if self.ksr_route_reqinit(msg)==-255 :
+            return 1
+# We don't handle PUBLISH, MESSAGE, KDMQ, NOTIFY, REFER, REGISTER, SUBSCRIBE, GET, POST, PUT or DELETE - we are a SIP Proxy. 
+# Just drop this traffic 
+        if KSR.is_method_in("KMNPFRSGTVD"):
+            return -255
+# include Initial Invite processing only
+        if KSR.is_method_in("I"):
+            KSR.xlog.xlog("L_DBG", "Invite received with CallID %s from IP %s " % (KSR.pv.get("$ci"),KSR.pv.get("$si")))
+# preset rr with private first then pub with second rr 
+            KSR.rr.record_route_advertised_address(kemivars.LB_SOCKET)
+# Do accounting
+            KSR.setflag(FLT_ACC)
+{% if (srv == 'recording') %}
+# RTPEngine manage here to get SDP
+        if self.ksr_route_rtpengine(msg) == -255:
+            return 1
+{% endif %}
+# CANCEL processing to get this done to stop timeouts and retransmits etc 
+        if self.ksr_handle_cancel(msg)==-255 :
+            return 1
+# handle requests within SIP dialogs
+        if self.ksr_route_withindlg(msg)==-255 :
+            return 1
+# Logging request
+        if self.ksr_log_request(msg)==-255 :
+            return 1
+# handle retransmissions
+        if KSR.tmx.t_precheck_trans() > 0:
+            KSR.tm.t_check_trans()
+            return 1
+# exit if already part of an existing transaction - its already being processed 
+        if KSR.tm.t_check_trans() == 0:
+            return 1
+# no R-URI user - no dice
+        if KSR.corex.has_ruri_user() < 0 :
+            KSR.sl.sl_send_reply(484, "Address Incomplete")
+            KSR.xlog.xlog("L_INFO", "Y no R-URI user? with CallID %s from IP %s " % (KSR.pv.get("$ci"),KSR.pv.get("$si")))
+            return 1
+# Main directional based routing logic
+        if self.ksr_route_dispatch(msg)==-255 :
+            return 1
+# dispatch requests to foreign domains
+#        if self.ksr_route_sipout(msg)==-255 :
+#            return 1
+        return 1
+##### End of Main Routing Block #####
+
+##### Call related functions defined here #####
+
+# CANCEL related function: processing to get this done to stop timeouts and retransmits etc 
+    def ksr_handle_cancel(self, msg):
+        if KSR.is_CANCEL():
+            if KSR.tm.t_check_trans()>0 :
+                self.ksr_route_relay(msg)
+            return 1
+
+# Initial requests get sanity checked and rejected outside of the below: 
+    def ksr_route_reqinit(self, msg):    
+        if KSR.maxfwd.process_maxfwd(10) < 0:
+            KSR.xlog.xlog("L_INFO", "Sending 483 with CallID %s from IP %s " % (KSR.pv.get("$ci"),KSR.pv.get("$si")))
+            KSR.sl.sl_send_reply(483, "Too Many Hops")
+            return -255
+# Respond to all OPTIONS addressed to Kamailio only - we are locked down on IP's via the firewall so this is fine. 
+        if (KSR.is_OPTIONS() and KSR.is_myself_ruri()):
+            KSR.xlog.xlog("L_DBG", "OPTIONS received and responded to")
+            KSR.sl.sl_send_reply(200, "Keepalive")
+            return -255
+# Sanity checking everything coming in. 
+        if KSR.sanity.sanity_check(1511, 7) < 0:
+            KSR.xlog.xlog("L_ERR", "Malformed SIP message from with CallID %s from IP %s " % (KSR.pv.get("$ci"),KSR.pv.get("$si")))
+            return -255
+
+# Handle request logging
+    def ksr_log_request(self, msg):
+# Generate random transaction ID to link request to reply
+        rand = os.urandom(3)
+        KSR.pv.seti("$avp(tid)", int.from_bytes(rand, 'big'))
+        input = "REQUEST: transaction_id=%d;timestamp=%d;method=%s;source_ip=%s;source_port=%d;dest_ip=%s;dest_port=%d;transport=%s;cseq=%s;call_id=%s;contact=\"%s\";from_user=%s;from_domain=%s;to_user=%s;to_domain=%s;request_user=%s;request_domain=%s;" % (KSR.pv.get("$avp(tid)"), KSR.pv.get("$Ts"), KSR.pv.get("$rm"), KSR.pv.get("$si"), KSR.pv.get("$sp"), KSR.pv.get("$Ri"), KSR.pv.get("$Rp"), KSR.pv.get("$pr"), KSR.pv.get("$cs"), KSR.pv.get("$ci"), KSR.pv.get("$ct"), KSR.pv.get("$fU"), KSR.pv.get("$fd"), KSR.pv.get("$tU"), KSR.pv.get("$td"), KSR.pv.get("$oU"), KSR.pv.get("$od"))
+        self.request_syslog(input)
+        return 1
+
+# URI update for dialog requests if the $du is not yet set. 
+# This is from the B2BUA behaviour in the dispatcher block - specifically the CONTACT header manipulation. 
+    def ksr_route_dlguri(self, msg):
+        if not KSR.isdsturiset() :
+            KSR.xlog.xlog("L_DBG", "No dest URI set - adding R-URI alias with CallID %s from IP %s " % (KSR.pv.get("$ci"),KSR.pv.get("$si")))
+            KSR.nathelper.handle_ruri_alias()
+        return 1
+
+# Routing to foreign domains
+    def ksr_route_sipout(self, msg):
+        if KSR.is_myself_ruri() :
+            return 1
+        KSR.xlog.xlog("L_DBG", "Routing out to foreign domain %s with CallID %s from IP %s " % (KSR.pv.get("$du"),KSR.pv.get("$ci"),KSR.pv.get("$si")))
+        self.ksr_route_relay(msg)
+        return -255
+
+# Manage outgoing branches
+# -- equivalent of branch_route[...]{}
+    def ksr_branch_manage(self, msg):
+        KSR.xlog.xlog("L_DBG", "new branch ["+ str(KSR.pv.get("$T_branch_idx")) + "] to "+ KSR.pv.get("$ru") + "\n")
+#        KSR.nathelper.set_contact_alias()
+        return 1
+
+# Handle requests within SIP dialogs
+    def ksr_route_withindlg(self, msg):
+# Exit out of function if no TO tag
+        if KSR.siputils.has_totag() < 0:
+            return 1
+        KSR.xlog.xlog("L_DBG", "Response received within dialog with CallID %s from IP %s " % (KSR.pv.get("$ci"),KSR.pv.get("$si")))
+# Set contact alias for use later with the 
+        KSR.nathelper.set_contact_alias()
+{% if (srv == 'recording') %}
+# RTPEngine handling for UPDATES & reINVITES with sdp
+        if self.ksr_route_rtpengine(msg) == -255:
+            return 1
+# RTPengine cleanup
+        if KSR.is_BYE():
+            KSR.rtpengine.rtpengine_delete("")
+            KSR.xlog.xlog("L_DBG", "RTPengine cleanup on BYE")
+{% endif %}
+# sequential request withing a dialog should take the path determined by record-routing
+# Added a dlguri check here so if its in lr but not got a dsturi set - take the contact alias (now R-URI)
+        if KSR.rr.loose_route() :
+            if self.ksr_route_dlguri(msg)==-255 :
+                return -255
+            if KSR.is_BYE():
+                KSR.setflag(FLT_ACC)
+                KSR.setflag(FLT_ACCFAILED)
+                KSR.xlog.xlog("L_INFO", "Routing BYE with CallID %s from IP %s " % (KSR.pv.get("$ci"),KSR.pv.get("$si")))
+# loose route - so route relay it:
+            self.ksr_route_relay(msg)
+            return -255
+# ACK with no lr
+        if KSR.is_ACK():
+            if KSR.tm.t_check_trans() > 0:
+                KSR.xlog.xlog("L_DBG", "Routing ACK so its not lost")
+# no loose-route, but stateful ACK
+                self.ksr_route_relay(msg)
+            else:
+# ACK without matching transmission - ignore and drop 
+                KSR.xlog.xlog("L_DBG", "Dropped a stateful ACK here")
+                return -255
+# Shouldn't have anything hit this error but here to stop routing. Likely a BYE with no loose routing 
+            KSR.sl.sl_send_reply(404, "No more request here")
+        return -255
+
+# Wrapper around tm relay function - specifically t_relay()
+# If this is an INVITE, BYE or UPDATE - handle the branch_manage - this is to the R-URI contained in said method. 
+    def ksr_route_relay(self, msg):
+        if KSR.is_method_in("IBU") :
+            if KSR.tm.t_is_set("branch_route")<0 :
+                KSR.tm.t_on_branch("ksr_branch_manage")
+        KSR.xlog.xlog("L_DBG", "Hits route relay with CallID %s from IP %s " % (KSR.pv.get("$ci"),KSR.pv.get("$si")))
+#        if KSR.is_method_in("ABCIU"): 
+        if KSR.tm.t_is_set("onreply_route") < 0:
+            KSR.tm.t_on_reply("ksr_onreply_manage")                
+        if KSR.tm.t_relay() < 0:
+            KSR.sl.sl_reply_error()
+        return -255
+
+# On Send Route
+    def ksr_onsend_route(self, msg):
+        return 1
+
+# Manage incoming replies
+# -- equivalent of onreply_route{}
+    def ksr_onreply_manage(self, msg):
+        KSR.xlog.xlog("L_DBG", "Hits onreply route with CallID %s from IP %s " % (KSR.pv.get("$ci"),KSR.pv.get("$si")))
+        if self.ksr_route_rtpengine(msg) == -255:
+            return 1
+# Handle dialog for all responses: 
+#        KSR.dialog.dlg_manage()
+{% if (srv == 'recording') %}
+# Handle error response and port reclaim:
+        if KSR.tm.t_get_status_code() >= 400:
+            KSR.rtpengine.rtpengine_manage("")
+            KSR.xlog.xlog("L_INFO", "clearing rtpengine resource on final error %s response %s" % (KSR.pv.get("$rs"),KSR.pv.get("$ci")))
+        if KSR.is_method_in("C") and KSR.pv.get("$avp(cancel_trans)") is not None:
+            if KSR.tm.t_check_status("481") > 0:
+                KSR.err('Dropping 481 status for cancel transaction')
+{% else %}
+# Handle error responses:
+        if KSR.tm.t_get_status_code() >= 400:
+            KSR.info('clearing resource on final error %s response %s' % (KSR.pv.get("$rs"),KSR.pv.get("$ci")))
+        if KSR.is_method_in("C") and KSR.pv.get("$avp(cancel_trans)") is not None:
+            if KSR.tm.t_check_status("481") > 0:
+                KSR.err('Dropping 481 status for cancel transaction')
+{% endif %}
+        return 1
+
+# SIP response handling
+# -- equivalent of reply_route{}
+# Anything here is handled magically within RFC 3261 route/Via headers. 
+# Putting here with no inputs for clarity on how replies are managed within a reply_route{}
+    def ksr_reply_route(self, msg):
+        KSR.xlog.xlog("L_DBG", "reply route on call ID %s from IP %s - response code %s " % (KSR.pv.get("$ci"), KSR.pv.get("$si"), KSR.pv.get("$rs")))
+# RTPengine manage for replies
+        if KSR.textops.has_body_type("application/sdp") > 0 :
+            if self.ksr_route_rtpengine(msg) == -255:
+                return 1
+            KSR.xlog.xlog("L_DBG", "RTPengine looping incoming replies")
+        return 1
+
+# Dispatcher Routing: For INVITES ONLY - subsequent requests are handled in the reply_route{}
+    def ksr_route_dispatch(self, msg):
+# Handle ONLY INVITES for the $dd routing - let t_relay() via the onreply_route() do the normal routing for replies.
+        if KSR.is_method_in("I"):
+# If call comes from a trusted IP:
+# Group 200 is Customer IP - send to carrier
+            if KSR.permissions.allow_source_address(200)==1 :
+                dispatch_setid = kemivars.CA
+                KSR.rr.add_rr_param(";service=Outbound")
+# Set $dd in the $rd & $td - R-URI & TO domain to match the Destionation domain for routing - Only a carrier address here. 
+                destdom = KSR.pv.get("$dd")
+                KSR.pv.sets("$rd", destdom)
+                KSR.pv.sets("$td", destdom)
+                KSR.nathelper.set_contact_alias()
+                KSR.xlog.xlog("L_INFO", "Outbound call to Carrier setID 1 from callID %s from CLI %s to %s using PAID %s" % (KSR.pv.get("$ci"),KSR.pv.get("$fU"),KSR.pv.get("$tU"),KSR.pv.get("$ai")))
+# On failure:
+                KSR.tm.t_on_failure("ksr_failure_dispatch")
+                if not KSR.dispatcher.ds_select_dst(dispatch_setid, 9):
+{% if (srv == 'recording') %}
+                    self.ksr_send_reply_clear_rtpengine(msg, 404, "No Carrier destination")
+{% else %}
+                    KSR.sl.sl_send_reply(404, "No Carrier destination")
+{% endif %}
+                    return 1
+# Group 300 is Carrier IP - do a DB lookup and send to customer from this lookup.
+# function "ksr_route_lookup()" is the query ran here and has handling no number/location found in the function.
+            elif KSR.permissions.allow_source_address(300)==1 :
+                KSR.rr.add_rr_param(";service=Inbound")
+                self.ksr_route_lookup(msg)
+                KSR.nathelper.set_contact_alias()
+# Else - reject with 404 as not from a trusted source. 
+            else:
+{% if (srv == 'recording') %}
+                self.ksr_send_reply_clear_rtpengine(msg, 404, "No Bueno Amigo")
+{% else %}
+                KSR.sl.sl_send_reply(404, "No Bueno Amigo")
+{% endif %}
+                KSR.xlog.xlog("L_ERR", "Rejection due to no IP in address table for Invite from the number %s from IP %s with Call-ID %s" % (KSR.pv.get("$fU"),KSR.pv.get("$si"),KSR.pv.get("$ci")))
+                return -255
+            KSR.pv.sets("$fs", kemivars.LB_SOCKET)
+            #self.ksr_route_relay(msg)
+            KSR.tm.t_relay()
+            return 1
+# Setting the reply route - so this doesn't hit the dispatcher again. 
+        else:
+            KSR.tm.t_on_reply("ksr_onreply_manage");
+        return -255
+
+# Dispatcher failover logic:
+# Only hunt on 503, timeout, or no forward branches - do we need anymore?
+    def ksr_failure_dispatch(self, msg):
+        if KSR.tm.t_is_canceled() > 0:
+            return 1
+        if KSR.tm.t_check_status("503") > 0 or (KSR.tm.t_branch_timeout() > 0 and not KSR.tm.t_branch_replied() > 0):
+            if KSR.dispatcher.ds_next_dst() > 0:
+                KSR.pv.sets("$ru", "sip:" + KSR.pv.get("$rU") + "@" + KSR.pv.get("$dd"))
+                KSR.tm.t_on_failure("ksr_failure_dispatch")
+                self.ksr_route_relay(msg)
+                return -255
+            else:
+# When all dispatcher entries have been tried and failed - end transaction statefully with 503 - this should prompt failover to the other Kamailio IP (Hopefully)
+# TODO - Check the above statement
+                KSR.tm.t_reply(503, "No Dispatcher Destination")
+{% if (srv == 'recording') %}
+                KSR.rtpengine.rtpengine_manage("")
+{% endif %}
+                KSR.xlog.xlog("L_ERR", "Rejection to last dispatcher destination to Invite for %s from IP %s relaying to upstream statefully" % (KSR.pv.get("$ci"),KSR.pv.get("$si")))
+                KSR.tm.t_release()
+                return 1
+        return 1
+#####
+# Query for DB number lookup 
+#####
+# Route location is simple and should just work with $dd/$td formatting.
+    def ksr_route_lookup(self, msg):
+# Get the TO user - this is the key. Then as this is a KVP set the dest as the value.
+        tonum = KSR.pv.get("$tU")
+        dest = KSR.htable.sht_get("numloc", tonum)
+        if dest: 
+            KSR.pv.sets("$rd", dest)
+            KSR.pv.sets("$td", dest)
+            KSR.xlog.xlog("L_DBG", "Query route - The TO domain is %s " % KSR.pv.get("$td"))
+        else:
+# No location data for number: 
+            KSR.sl.sl_send_reply(404, "Number lookup failed")
+            KSR.xlog.xlog("L_ERR", "Number lookup failed - is the format correct for %s in the DB or is it even added" % KSR.pv.get("$tU"))
+            return -255
+##### End of lookup service #####
+# Go back dispatcher logic here for global vars
+
+{% if (srv == 'recording') %}
+# RTPengine manage functions for call recording based on an "X-Recording=" header. 
+    def ksr_route_rtpengine(self, msg):
+        if KSR.hdr.is_present("X-Recording") > 0:
+            if KSR.textops.has_body_type("application/sdp") > 0 :
+# Conditional statement to check for the header value
+                if str(KSR.pv.get("$(hdr(X-Recording))")).find("Start") == 0:
+                    KSR.rtpengine.start_recording()
+                    KSR.xlog.xlog("L_INFO", "RTPengine Recording ON - handling Block - CallID %s source %s received %s" % (KSR.pv.get("$ci"), KSR.pv.get("$si"), KSR.pv.get("$Ri")))
+                elif str(KSR.pv.get("$(hdr(X-Recording))")).find("Stop") == 0:
+                    KSR.rtpengine.stop_recording("pause")
+                    KSR.xlog.xlog("L_INFO", "RTPengine Recording PAUSED - handling Block - CallID %s source %s received %s" % (KSR.pv.get("$ci"), KSR.pv.get("$si"), KSR.pv.get("$Ri")))
+# If it has a header, but the value is not on/off - error out here and process the call with no recording.
+                else:
+                    KSR.xlog.xlog("L_ERR", "RTPengine Recording ERROR - handling Block - CallID %s source %s received %s" % (KSR.pv.get("$ci"), KSR.pv.get("$si"), KSR.pv.get("$Ri")))
+# Blocking RFC4733 DTMF (events and in-band) both directions - for recorded calls only - handle media normally. 
+# This is here so if DTMF are pressed whilst the call is recording they are dropped so no PCI_DSS breach can happen - TODO - JH - Check if this is needed. 
+                #KSR.rtpengine.block_dtmf()
+                KSR.rtpengine.rtpengine_manage("RTP/AVP replace-session-connection replace-origin port-latching ICE=remove direction=public ")
+# No header - RECORDS ALL - this is a stop gap until the above is in and then just remove the "KSR.rtpengine.start_recording()" from the below 
+        else:
+            if KSR.textops.has_body_type("application/sdp") > 0 :
+                KSR.rtpengine.start_recording() # remove this after the logic for start/stop is in
+                KSR.rtpengine.rtpengine_manage("RTP/AVP replace-session-connection replace-origin port-latching ICE=remove direction=public ")
+                KSR.xlog.xlog("L_INFO", "RTPengine handling Block - CallID %s source %s received %s" % (KSR.pv.get("$ci"), KSR.pv.get("$si"), KSR.pv.get("$Ri")))
+        return 1
+# Port cleanup
+    def ksr_send_reply_clear_rtpengine(self, msg, code:int, reason:str):
+        KSR.sl.sl_send_reply(code, reason)
+        if KSR.is_method_in("I"):
+            KSR.xlog.xlog("L_INFO", "clearing rtpengine resource after generating %d for call-id %s" % (code, KSR.pv.get("$ci")))
+            KSR.rtpengine.rtpengine_manage("")
+{% endif %}
+
+##### End of call related functions #####
+
+# -- {end defining kamailio class}
+
+##### general debugging functions #####
+# Syslog helper
+    def request_syslog(self, input):
+        syslog.syslog(syslog.LOG_INFO | syslog.LOG_LOCAL2, str(input))
+
+# global helper function for debugging purposes
+def dumpObj(obj):
+    for attr in dir(obj):
+        KSR.info("obj.%s = %s\n" % (attr, getattr(obj, attr)))
+
+# EOF - That's all folks! 
