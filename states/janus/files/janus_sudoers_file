@@ -1,0 +1,2 @@
+# User rules for janus
+janus ALL=(ALL) NOPASSWD:ALL

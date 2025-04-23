@@ -18,5 +18,6 @@ Grains - the VM's own data. (private ip, mac address, hostname, etc)
 Mine - other VM's grain data (same as above)
 Pillar - data that the VM's would not naturally know. (fqdn, external services, etc)
 Custom grains - You have to run the sync_grains script. This parses the hostname in grains and adds them to the box. 
+Sensitive data - this is added to the /cfg path by terraform so any passwords or fqdn's etc you need should be put in a file each, then use the bash scripts with sed as part of the install to swap them out. 
 
 # How to run
