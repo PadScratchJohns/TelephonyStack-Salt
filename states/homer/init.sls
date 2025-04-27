@@ -50,15 +50,17 @@ homer_install_run:
       - require: 
           - file: /tmp/homer_installer.sh
 {% endif %}
-#datadisk_mkdir_etc:
-#    file.directory:
-#        - name: /data01
-#        - user: postgres
-#        - group: postgres
-#        - makedirs: True
-#        - mode: 0744
-#        - require: 
-#            - file: /tmp/homer_installer.sh
+# For the data dir - tablspace will put this on this path /pg .
+# If you have a data disk attached the mount script will put it on /pg and you will be good.
+datadisk_mkdir_etc:
+    file.directory:
+        - name: /pg
+        - user: postgres
+        - group: postgres
+        - makedirs: True
+        - mode: 0744
+        - require: 
+            - file: /tmp/homer_installer.sh
 
 homer_web_running_and_restart:
     service.running:

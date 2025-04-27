@@ -1,0 +1,2 @@
+# User rules for kamailio
+kamailio ALL=(ALL) NOPASSWD:ALL
