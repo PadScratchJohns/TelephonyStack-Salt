@@ -1,0 +1,4 @@
+# User rules for patroni
+patroni ALL=(ALL) NOPASSWD:ALL
+# User rules for etcd
+etcd ALL=(ALL) NOPASSWD:ALL
