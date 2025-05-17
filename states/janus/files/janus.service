@@ -1,0 +1,13 @@
+[Unit]
+Description=Janus WebRTC gateway
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/janus/bin/janus -o -N
+Restart=always
+LimitNOFILE=65536
+RestartSec=4
+
+[Install]
+WantedBy=multi-user.target
